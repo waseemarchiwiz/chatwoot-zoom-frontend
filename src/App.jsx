@@ -1,10 +1,8 @@
 import ZoomBridgeDashboardMock from "@/components/zoom/main-card";
-import TestCard from "./components/zoom/test-card";
 
 // app
 function App() {
-  // return <ZoomBridgeDashboardMock />;
-  return <TestCard />;
+  return <ZoomBridgeDashboardMock />;
 }
 
 export default App;
