@@ -17,7 +17,15 @@ import {
   AlertCircle,
   Search,
 } from "lucide-react";
-import { BRIDGE_BASE_URL } from "@/config";
+
+const FALLBACK_BRIDGE_BASE_URL =
+  "https://call-center-crm.eastus2.cloudapp.azure.com/zoom";
+
+const BRIDGE_BASE_URL =
+  import.meta.env.VITE_BRIDGE_BASE_URL &&
+  import.meta.env.VITE_BRIDGE_BASE_URL !== "undefined"
+    ? import.meta.env.VITE_BRIDGE_BASE_URL
+    : FALLBACK_BRIDGE_BASE_URL;
 
 function formatDateTime(value) {
   if (!value) return "—";
@@ -192,22 +200,30 @@ export default function ZoomConversationPanel() {
 
       setError("");
 
-      const res = await fetch(
-        `${BRIDGE_BASE_URL}/api/zoom/conversation/${id}`,
-        {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-          },
+      const url = `${BRIDGE_BASE_URL}/api/zoom/conversation/${id}`;
+      console.log("Fetching Zoom bridge URL:", url);
+
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
         },
-      );
+      });
+
+      const text = await res.text();
 
       if (!res.ok) {
         throw new Error(`Bridge request failed with ${res.status}`);
       }
 
-      const data = await res.json();
-      console.log("i am data:---", data);
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(
+          `Bridge did not return JSON. First 120 chars: ${text.slice(0, 120)}`,
+        );
+      }
 
       setBridgeData(data);
       setSelectedCallIndex(0);
