@@ -1,8 +1,8 @@
-import ZoomBridgeDashboardMock from "@/components/zoom/main-card";
+import ZoomConversationPanel from "./components/zoom/main-card";
 
 // app
 function App() {
-  return <ZoomBridgeDashboardMock />;
+  return <ZoomConversationPanel />;
 }
 
 export default App;

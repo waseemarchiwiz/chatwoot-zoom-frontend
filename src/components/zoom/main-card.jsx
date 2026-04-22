@@ -1,12 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import {
   Phone,
   Clock3,
@@ -18,70 +16,8 @@ import {
   CheckCircle2,
   AlertCircle,
   Search,
-  Copy,
 } from "lucide-react";
-
-const samplePayload = {
-  conversationId: 91,
-  source: "zoom-bridge",
-  syncedAt: "2026-04-10T10:45:00Z",
-  call: {
-    id: "zoom-call-8f21a1",
-    direction: "inbound",
-    status: "completed",
-    queueName: "Reception Queue",
-    agentName: "Agent 1",
-    callerNumber: "+92 300 1234567",
-    calleeNumber: "+92 21 1111111",
-    customerName: "Muhammad Ali",
-    startedAt: "2026-04-10T10:12:18Z",
-    endedAt: "2026-04-10T10:18:42Z",
-    durationSeconds: 384,
-    disposition: "Follow up needed",
-  },
-  recording: {
-    status: "ready",
-    url: "https://zoom.example.com/recording/8f21a1",
-    downloadUrl: "https://zoom.example.com/recording/8f21a1/download",
-    fileType: "mp3",
-    fileSizeMb: 12.4,
-  },
-  ai: {
-    summary:
-      "Caller asked about appointment confirmation and insurance coverage. Agent verified the profile, confirmed the appointment window, and requested one missing document. A follow-up reminder is needed before tomorrow afternoon.",
-    sentiment: "neutral-positive",
-    keyTopics: ["appointment", "insurance", "document pending"],
-    actionItems: [
-      "Send document reminder to customer",
-      "Add note for front desk to verify insurance card",
-      "Confirm tomorrow appointment slot",
-    ],
-    riskFlags: ["missing document"],
-    nextStepOwner: "Front desk",
-  },
-  transcript: [
-    {
-      speaker: "Customer",
-      time: "00:05",
-      text: "I am calling to confirm my appointment and check whether my insurance has been updated.",
-    },
-    {
-      speaker: "Agent",
-      time: "00:19",
-      text: "I can help with that. I can see your appointment, but one document is still pending from your side.",
-    },
-    {
-      speaker: "Customer",
-      time: "00:36",
-      text: "Please send me a reminder. I will upload it today.",
-    },
-    {
-      speaker: "Agent",
-      time: "00:52",
-      text: "Sure, I will note it down and we will follow up before tomorrow afternoon.",
-    },
-  ],
-};
+import { BRIDGE_BASE_URL } from "@/config";
 
 function formatDateTime(value) {
   if (!value) return "—";
@@ -90,28 +26,34 @@ function formatDateTime(value) {
   return date.toLocaleString();
 }
 
-function formatDuration(seconds) {
-  if (!seconds && seconds !== 0) return "—";
-  const mins = Math.floor(seconds / 60);
-  const secs = seconds % 60;
-  return `${mins}m ${secs}s`;
+function formatDuration(seconds, fallback = "—") {
+  if (seconds === null || seconds === undefined || seconds === "") {
+    return fallback;
+  }
+  const s = Number(seconds);
+  if (Number.isNaN(s)) return fallback;
+  const mins = Math.floor(s / 60);
+  const secs = s % 60;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
 }
 
 function statusTone(status = "") {
-  const normalized = status.toLowerCase();
-  if (["completed", "ready", "synced"].includes(normalized))
-    return "bg-green-100 text-green-800 border-green-200";
-  if (["processing", "pending"].includes(normalized))
-    return "bg-amber-100 text-amber-800 border-amber-200";
-  return "bg-slate-100 text-slate-800 border-slate-200";
-}
+  const normalized = String(status || "").toLowerCase();
 
-function safeParse(text) {
-  try {
-    return { data: JSON.parse(text), error: null };
-  } catch (error) {
-    return { data: null, error: error.message };
+  if (["completed", "answered", "ready", "synced"].includes(normalized)) {
+    return "bg-green-100 text-green-800 border-green-200";
   }
+
+  if (["processing", "pending", "in_progress"].includes(normalized)) {
+    return "bg-amber-100 text-amber-800 border-amber-200";
+  }
+
+  if (["missed", "failed", "voicemail"].includes(normalized)) {
+    return "bg-rose-100 text-rose-800 border-rose-200";
+  }
+
+  return "bg-slate-100 text-slate-800 border-slate-200";
 }
 
 function Stat({ icon: Icon, label, value }) {
@@ -121,45 +63,250 @@ function Stat({ icon: Icon, label, value }) {
         <Icon className="h-4 w-4" />
         <span>{label}</span>
       </div>
-      <div className="text-base font-semibold text-slate-900">{value}</div>
+      <div className="text-base font-semibold text-slate-900">
+        {value || "—"}
+      </div>
     </div>
   );
 }
 
-export default function ZoomBridgeDashboardMock() {
-  const [jsonText, setJsonText] = useState(
-    JSON.stringify(samplePayload, null, 2),
+function EmptyState({ title, message }) {
+  return (
+    <Card className="rounded-2xl shadow-sm">
+      <CardContent className="py-14 text-center">
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        <p className="mt-2 text-sm text-slate-500">{message}</p>
+      </CardContent>
+    </Card>
   );
-  const [search, setSearch] = useState("");
+}
 
-  const { data, error } = useMemo(() => safeParse(jsonText), [jsonText]);
-  const payload = data || samplePayload;
+function parseEventData(data) {
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  }
+  return data;
+}
+
+function normalizeCall(call, bridgePayload) {
+  const transcriptSegments = [];
+
+  if (call?.voicemail?.transcript) {
+    transcriptSegments.push({
+      speaker: "Voicemail transcript",
+      time: "",
+      text: call.voicemail.transcript,
+    });
+  }
+
+  if (Array.isArray(call?.routePath)) {
+    call.routePath.forEach((step, index) => {
+      transcriptSegments.push({
+        speaker:
+          step.operatorName ||
+          step.calleeName ||
+          step.event ||
+          `Step ${index + 1}`,
+        time: step.startTime || step.answerTime || step.endTime || "",
+        text: [
+          step.event || "route",
+          step.result || "",
+          step.operatorName ? `operator: ${step.operatorName}` : "",
+          step.calleeExtType ? `target type: ${step.calleeExtType}` : "",
+          step.waitTime ? `wait: ${step.waitTime}s` : "",
+          step.talkTime ? `talk: ${step.talkTime}s` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+    });
+  }
+
+  return {
+    conversationId: bridgePayload?.conversationId,
+    source: "zoom-bridge",
+    syncedAt: call?.endedAt || call?.startedAt || "",
+    call: {
+      id: call?.zoomCallId || "—",
+      direction: call?.direction || "—",
+      status: call?.status || "unknown",
+      queueName: call?.queue?.name || "—",
+      queueExtension: call?.queue?.extension || "",
+      agentName:
+        call?.answeredBy?.name ||
+        call?.caller?.name ||
+        call?.callee?.name ||
+        "—",
+      callerNumber: call?.caller?.number || "—",
+      calleeNumber: call?.callee?.number || "—",
+      customerName: call?.caller?.name || call?.callee?.name || "—",
+      startedAt: call?.startedAt || "",
+      endedAt: call?.endedAt || "",
+      durationSeconds: call?.durationSeconds ?? null,
+      disposition: call?.handupResult || "—",
+      waitSeconds: call?.waitSeconds ?? null,
+      autoReceptionistName: call?.autoReceptionist?.name || "",
+      autoReceptionistExtension: call?.autoReceptionist?.extension || "",
+    },
+    recording: {
+      status: call?.recording?.available ? "ready" : "not available",
+      url: call?.recording?.url || "",
+      fileType: call?.recording?.available ? "audio" : "",
+      fileSizeMb: null,
+    },
+    ai: {
+      summary: call?.aiSummary?.text || "",
+      sentiment: "—",
+      keyTopics: [],
+      actionItems: [],
+      riskFlags: [],
+      nextStepOwner: call?.queue?.name || "—",
+    },
+    transcript: transcriptSegments,
+    raw: bridgePayload,
+  };
+}
+
+export default function ZoomConversationPanel() {
+  const [conversationId, setConversationId] = useState(null);
+  const [bridgeData, setBridgeData] = useState(null);
+  const [selectedCallIndex, setSelectedCallIndex] = useState(0);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+
+  const fetchZoomConversation = async (id, refresh = false) => {
+    if (!id) return;
+
+    try {
+      if (refresh) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
+
+      setError("");
+
+      const res = await fetch(
+        `${BRIDGE_BASE_URL}/api/zoom/conversation/${id}`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
+        },
+      );
+
+      if (!res.ok) {
+        throw new Error(`Bridge request failed with ${res.status}`);
+      }
+
+      const data = await res.json();
+      console.log("i am data:---", data);
+
+      setBridgeData(data);
+      setSelectedCallIndex(0);
+    } catch (err) {
+      setError(err?.message || "Failed to load Zoom data");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleMessage = (event) => {
+      const incoming = parseEventData(event.data);
+
+      if (!incoming || incoming.event !== "appContext") return;
+
+      const id = incoming?.data?.conversation?.id || incoming?.data?.id || null;
+
+      if (!id) return;
+
+      setConversationId(id);
+      fetchZoomConversation(id);
+    };
+
+    window.addEventListener("message", handleMessage);
+    window.parent?.postMessage("chatwoot-dashboard-app:fetch-info", "*");
+
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
+  }, []);
+
+  const selectedCall = bridgeData?.calls?.[selectedCallIndex] || null;
+
+  const payload = useMemo(() => {
+    if (!selectedCall || !bridgeData) return null;
+    return normalizeCall(selectedCall, bridgeData);
+  }, [selectedCall, bridgeData]);
 
   const filteredTranscript = useMemo(() => {
     const segments = payload?.transcript || [];
     if (!search.trim()) return segments;
+
     const q = search.toLowerCase();
     return segments.filter(
-      (s) =>
-        String(s.speaker || "")
+      (segment) =>
+        String(segment.speaker || "")
           .toLowerCase()
           .includes(q) ||
-        String(s.text || "")
+        String(segment.text || "")
           .toLowerCase()
           .includes(q) ||
-        String(s.time || "")
+        String(segment.time || "")
           .toLowerCase()
           .includes(q),
     );
   }, [payload, search]);
 
-  const copyJson = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-    } catch {
-      console.log("copied the file..");
-    }
-  };
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 p-4 md:p-6">
+        <EmptyState
+          title="Loading Zoom data"
+          message="Waiting for Chatwoot conversation context and bridge response."
+        />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-50 p-4 md:p-6">
+        <EmptyState title="Zoom panel error" message={error} />
+      </div>
+    );
+  }
+
+  if (!conversationId) {
+    return (
+      <div className="min-h-screen bg-slate-50 p-4 md:p-6">
+        <EmptyState
+          title="No conversation selected"
+          message="Open a Chatwoot conversation first so this tab can load the matching Zoom call."
+        />
+      </div>
+    );
+  }
+
+  if (!bridgeData?.hasMatch || !bridgeData?.calls?.length) {
+    return (
+      <div className="min-h-screen bg-slate-50 p-4 md:p-6">
+        <EmptyState
+          title="No Zoom call found"
+          message={`No Zoom call is linked to Chatwoot conversation #${conversationId} yet.`}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-6">
@@ -170,7 +317,7 @@ export default function ZoomBridgeDashboardMock() {
               <CardHeader className="pb-3">
                 <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
                   <div>
-                    <div className="mb-2 flex items-center gap-2">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
                       <Badge
                         className={`${statusTone(payload?.call?.status)} border`}
                       >
@@ -183,20 +330,37 @@ export default function ZoomBridgeDashboardMock() {
                         {payload?.source || "zoom-bridge"}
                       </Badge>
                     </div>
+
                     <CardTitle className="text-2xl">
                       Zoom Call Workspace
                     </CardTitle>
+
                     <p className="mt-2 text-sm text-slate-500">
-                      Fast mock dashboard for reviewing call details,
-                      recordings, AI summary, and transcript.
+                      Live conversation-scoped Zoom data for the selected
+                      Chatwoot thread.
                     </p>
                   </div>
+
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="outline" className="rounded-xl gap-2">
-                      <RefreshCw className="h-4 w-4" />
+                    <Button
+                      variant="outline"
+                      className="rounded-xl gap-2"
+                      onClick={() =>
+                        fetchZoomConversation(conversationId, true)
+                      }
+                      disabled={refreshing}
+                    >
+                      <RefreshCw
+                        className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
+                      />
                       Refresh
                     </Button>
-                    <Button className="rounded-xl gap-2" asChild>
+
+                    <Button
+                      className="rounded-xl gap-2"
+                      asChild
+                      disabled={!payload?.recording?.url}
+                    >
                       <a
                         href={payload?.recording?.url || "#"}
                         target="_blank"
@@ -208,13 +372,37 @@ export default function ZoomBridgeDashboardMock() {
                     </Button>
                   </div>
                 </div>
+
+                {bridgeData?.calls?.length > 1 && (
+                  <div className="mt-4">
+                    <label className="mb-2 block text-sm font-medium text-slate-600">
+                      Select call
+                    </label>
+                    <select
+                      className="w-full rounded-xl border bg-white px-3 py-2 text-sm"
+                      value={selectedCallIndex}
+                      onChange={(e) =>
+                        setSelectedCallIndex(Number(e.target.value))
+                      }
+                    >
+                      {bridgeData.calls.map((call, index) => (
+                        <option key={call.zoomCallId || index} value={index}>
+                          {call.zoomCallId || `Call ${index + 1}`} ·{" "}
+                          {formatDateTime(call.endedAt || call.startedAt)} ·{" "}
+                          {call.direction || "—"} · {call.status || "—"}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </CardHeader>
+
               <CardContent>
                 <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                   <Stat
                     icon={Phone}
                     label="Direction"
-                    value={payload?.call?.direction || "—"}
+                    value={payload?.call?.direction}
                   />
                   <Stat
                     icon={Clock3}
@@ -224,12 +412,12 @@ export default function ZoomBridgeDashboardMock() {
                   <Stat
                     icon={UserRound}
                     label="Agent"
-                    value={payload?.call?.agentName || "—"}
+                    value={payload?.call?.agentName}
                   />
                   <Stat
                     icon={Brain}
-                    label="Sentiment"
-                    value={payload?.ai?.sentiment || "—"}
+                    label="Wait"
+                    value={formatDuration(payload?.call?.waitSeconds)}
                   />
                 </div>
               </CardContent>
@@ -238,8 +426,8 @@ export default function ZoomBridgeDashboardMock() {
             <Tabs defaultValue="overview" className="space-y-4">
               <TabsList className="grid w-full grid-cols-4 rounded-2xl bg-white shadow-sm">
                 <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="summary">AI Summary</TabsTrigger>
-                <TabsTrigger value="transcript">Transcript</TabsTrigger>
+                <TabsTrigger value="summary">AI / Notes</TabsTrigger>
+                <TabsTrigger value="transcript">Transcript / Route</TabsTrigger>
                 <TabsTrigger value="raw">Raw JSON</TabsTrigger>
               </TabsList>
 
@@ -310,33 +498,24 @@ export default function ZoomBridgeDashboardMock() {
                           {payload?.recording?.status || "unknown"}
                         </span>
                       </div>
-                      <div className="grid gap-3 md:grid-cols-2">
-                        <div className="rounded-xl bg-slate-50 p-3">
-                          <div className="text-slate-500">File type</div>
-                          <div className="font-semibold">
-                            {payload?.recording?.fileType || "—"}
-                          </div>
-                        </div>
-                        <div className="rounded-xl bg-slate-50 p-3">
-                          <div className="text-slate-500">File size</div>
-                          <div className="font-semibold">
-                            {payload?.recording?.fileSizeMb
-                              ? `${payload.recording.fileSizeMb} MB`
-                              : "—"}
-                          </div>
-                        </div>
-                      </div>
+
                       <div className="space-y-2">
                         <div className="text-slate-500">Recording link</div>
-                        <a
-                          href={payload?.recording?.url || "#"}
-                          className="flex items-center gap-2 break-all text-blue-600 hover:underline"
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <LinkIcon className="h-4 w-4" />
-                          {payload?.recording?.url || "No link"}
-                        </a>
+                        {payload?.recording?.url ? (
+                          <a
+                            href={payload.recording.url}
+                            className="flex items-center gap-2 break-all text-blue-600 hover:underline"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <LinkIcon className="h-4 w-4" />
+                            {payload.recording.url}
+                          </a>
+                        ) : (
+                          <div className="text-slate-500">
+                            No recording available yet
+                          </div>
+                        )}
                       </div>
                     </CardContent>
                   </Card>
@@ -351,7 +530,7 @@ export default function ZoomBridgeDashboardMock() {
                     </CardHeader>
                     <CardContent>
                       <p className="leading-7 text-slate-700">
-                        {payload?.ai?.summary || "No summary available."}
+                        {payload?.ai?.summary || "No AI summary available yet."}
                       </p>
                     </CardContent>
                   </Card>
@@ -362,77 +541,36 @@ export default function ZoomBridgeDashboardMock() {
                         <CardTitle className="text-lg">Action items</CardTitle>
                       </CardHeader>
                       <CardContent>
-                        <div className="space-y-2">
-                          {(payload?.ai?.actionItems || []).map(
-                            (item, index) => (
-                              <div
-                                key={index}
-                                className="rounded-xl bg-slate-50 p-3 text-sm"
-                              >
-                                {item}
-                              </div>
-                            ),
-                          )}
-                          {!(payload?.ai?.actionItems || []).length && (
-                            <div className="text-sm text-slate-500">
-                              No action items.
-                            </div>
-                          )}
+                        <div className="text-sm text-slate-500">
+                          No structured action items are coming from the bridge
+                          yet.
                         </div>
                       </CardContent>
                     </Card>
 
                     <Card className="rounded-2xl shadow-sm">
                       <CardHeader>
-                        <CardTitle className="text-lg">
-                          Topics and flags
-                        </CardTitle>
+                        <CardTitle className="text-lg">Routing</CardTitle>
                       </CardHeader>
                       <CardContent className="space-y-4">
-                        <div>
-                          <div className="mb-2 text-sm text-slate-500">
-                            Topics
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {(payload?.ai?.keyTopics || []).map(
-                              (topic, index) => (
-                                <Badge key={index} variant="outline">
-                                  {topic}
-                                </Badge>
-                              ),
-                            )}
-                          </div>
+                        <div className="text-sm">
+                          <span className="text-slate-500">Queue: </span>
+                          <span className="font-medium">
+                            {selectedCall?.queue?.name || "—"}
+                          </span>
                         </div>
-                        <Separator />
-                        <div>
-                          <div className="mb-2 text-sm text-slate-500">
-                            Risk flags
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {(payload?.ai?.riskFlags || []).map(
-                              (flag, index) => (
-                                <Badge
-                                  key={index}
-                                  className="bg-rose-100 text-rose-800 border border-rose-200"
-                                >
-                                  {flag}
-                                </Badge>
-                              ),
-                            )}
-                            {!(payload?.ai?.riskFlags || []).length && (
-                              <span className="text-sm text-slate-500">
-                                No risk flags.
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <Separator />
                         <div className="text-sm">
                           <span className="text-slate-500">
-                            Next step owner:{" "}
+                            Auto receptionist:{" "}
                           </span>
                           <span className="font-medium">
-                            {payload?.ai?.nextStepOwner || "—"}
+                            {selectedCall?.autoReceptionist?.name || "—"}
+                          </span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-slate-500">Answered by: </span>
+                          <span className="font-medium">
+                            {selectedCall?.answeredBy?.name || "—"}
                           </span>
                         </div>
                       </CardContent>
@@ -444,13 +582,15 @@ export default function ZoomBridgeDashboardMock() {
               <TabsContent value="transcript">
                 <Card className="rounded-2xl shadow-sm">
                   <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
-                    <CardTitle className="text-lg">Transcript</CardTitle>
+                    <CardTitle className="text-lg">
+                      Transcript / Route
+                    </CardTitle>
                     <div className="relative w-full md:w-80">
                       <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
                       <Input
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
-                        placeholder="Search transcript"
+                        placeholder="Search"
                         className="pl-9 rounded-xl"
                       />
                     </div>
@@ -458,27 +598,28 @@ export default function ZoomBridgeDashboardMock() {
                   <CardContent>
                     <ScrollArea className="h-[420px] pr-4">
                       <div className="space-y-3">
-                        {filteredTranscript.map((segment, index) => (
-                          <div
-                            key={index}
-                            className="rounded-2xl border bg-white p-4"
-                          >
-                            <div className="mb-2 flex items-center justify-between gap-3">
-                              <div className="font-semibold text-slate-900">
-                                {segment.speaker || "Speaker"}
+                        {filteredTranscript.length ? (
+                          filteredTranscript.map((segment, index) => (
+                            <div
+                              key={index}
+                              className="rounded-2xl border bg-white p-4"
+                            >
+                              <div className="mb-2 flex items-center justify-between gap-3">
+                                <div className="font-semibold text-slate-900">
+                                  {segment.speaker || "Speaker"}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  {formatDateTime(segment.time)}
+                                </div>
                               </div>
-                              <div className="text-xs text-slate-500">
-                                {segment.time || "—"}
-                              </div>
+                              <p className="text-sm leading-6 text-slate-700">
+                                {segment.text || ""}
+                              </p>
                             </div>
-                            <p className="text-sm leading-6 text-slate-700">
-                              {segment.text || ""}
-                            </p>
-                          </div>
-                        ))}
-                        {!filteredTranscript.length && (
+                          ))
+                        ) : (
                           <div className="text-sm text-slate-500">
-                            No matching transcript rows.
+                            No transcript or routing detail available yet.
                           </div>
                         )}
                       </div>
@@ -489,34 +630,15 @@ export default function ZoomBridgeDashboardMock() {
 
               <TabsContent value="raw">
                 <Card className="rounded-2xl shadow-sm">
-                  <CardHeader className="gap-3 md:flex-row md:items-center md:justify-between">
+                  <CardHeader>
                     <CardTitle className="text-lg">
-                      Paste bridge response JSON
+                      Raw bridge response
                     </CardTitle>
-                    <Button
-                      variant="outline"
-                      className="rounded-xl gap-2"
-                      onClick={copyJson}
-                    >
-                      <Copy className="h-4 w-4" />
-                      Copy current JSON
-                    </Button>
                   </CardHeader>
-                  <CardContent className="space-y-3">
-                    <Textarea
-                      value={jsonText}
-                      onChange={(e) => setJsonText(e.target.value)}
-                      className="min-h-[420px] rounded-2xl font-mono text-xs"
-                    />
-                    {error ? (
-                      <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
-                        Invalid JSON: {error}
-                      </div>
-                    ) : (
-                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
-                        JSON parsed successfully.
-                      </div>
-                    )}
+                  <CardContent>
+                    <pre className="max-h-[520px] overflow-auto rounded-2xl bg-slate-950 p-4 text-xs text-slate-100">
+                      {JSON.stringify(bridgeData, null, 2)}
+                    </pre>
                   </CardContent>
                 </Card>
               </TabsContent>
@@ -530,25 +652,27 @@ export default function ZoomBridgeDashboardMock() {
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
                 <div className="flex justify-between gap-4">
-                  <span className="text-slate-500">Bridge source</span>
-                  <span className="font-medium">{payload?.source || "—"}</span>
+                  <span className="text-slate-500">Conversation</span>
+                  <span className="font-medium">{conversationId}</span>
                 </div>
                 <div className="flex justify-between gap-4">
-                  <span className="text-slate-500">Sync time</span>
-                  <span className="font-medium text-right">
-                    {formatDateTime(payload?.syncedAt)}
+                  <span className="text-slate-500">Match type</span>
+                  <span className="font-medium">
+                    {bridgeData?.matchType || "—"}
                   </span>
                 </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-slate-500">Call ID</span>
                   <span className="font-medium text-right break-all">
-                    {payload?.call?.id || "—"}
+                    {selectedCall?.zoomCallId || "—"}
                   </span>
                 </div>
                 <div className="flex justify-between gap-4">
                   <span className="text-slate-500">Recording status</span>
                   <span className="font-medium">
-                    {payload?.recording?.status || "—"}
+                    {selectedCall?.recording?.available
+                      ? "ready"
+                      : "not available"}
                   </span>
                 </div>
               </CardContent>
@@ -556,22 +680,16 @@ export default function ZoomBridgeDashboardMock() {
 
             <Card className="rounded-2xl shadow-sm">
               <CardHeader>
-                <CardTitle className="text-lg">
-                  Why this fits the project
-                </CardTitle>
+                <CardTitle className="text-lg">Bridge notes</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm leading-6 text-slate-700">
                 <p>
-                  This mock keeps Zoom-specific details in a separate panel
-                  instead of modifying Chatwoot core heavily.
+                  This panel is live against the Zoom bridge and scoped to the
+                  currently selected Chatwoot conversation.
                 </p>
                 <p>
-                  You can replace the sample JSON with your real bridge response
-                  and immediately see how the UI behaves.
-                </p>
-                <p>
-                  Once the layout is approved, wire this view to your live
-                  bridge endpoint or Dashboard App integration.
+                  Test first with mapped conversations like <b>2457</b> and{" "}
+                  <b>2458</b>.
                 </p>
               </CardContent>
             </Card>
